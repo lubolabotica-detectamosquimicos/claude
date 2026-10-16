@@ -1,0 +1,43 @@
+# ── Dependencias ─────────────────────────────────────────────
+node_modules/
+.pnp.*
+.yarn/
+
+# ── Build / caché ────────────────────────────────────────────
+dist/
+build/
+coverage/
+.vite/
+*.tsbuildinfo
+
+# ── Variables de entorno y SECRETOS (nunca subir) ────────────
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+serviceAccount*.json
+*-firebase-adminsdk-*.json
+firebase-debug.log
+.firebase/
+
+# ── Recursos del OCR (se regeneran solos con `npm install`) ──
+public/ocr/
+
+# ── Vercel ───────────────────────────────────────────────────
+.vercel/
+
+# ── Logs ─────────────────────────────────────────────────────
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# ── Sistema operativo / editores ─────────────────────────────
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/*
+!.vscode/extensions.json
+*.swp

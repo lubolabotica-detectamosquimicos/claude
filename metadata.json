@@ -1,0 +1,7 @@
+{
+  "name": "Lubo Botica - Lector de Ingredientes y Semáforo",
+  "description": "Aplicación web modular para escaneo local y seguro de ingredientes mediante cámara o texto, clasificación por semáforo Lubo offline y gestión de suscripciones.",
+  "requestFramePermissions": [
+    "camera"
+  ]
+}
