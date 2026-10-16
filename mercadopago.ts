@@ -24,7 +24,7 @@ export function planConfigFromEnv(env: Record<string, string | undefined> = proc
   return {
     monthlyAmount: n(env.PLAN_PRICE_MONTHLY, 6500),
     annualAmount: n(env.PLAN_PRICE_ANNUAL, 30000),
-    supportMinAmount: n(env.SUPPORT_MIN_AMOUNT, 5000),
+    supportMinAmount: n(env.SUPPORT_MIN_AMOUNT, 35000),
   };
 }
 
