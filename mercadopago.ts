@@ -1,79 +1,136 @@
-import { createHmac, timingSafeEqual } from 'node:crypto';
-import type { PaidPlan } from './entitlement.js';
+import type { VercelRequest, VercelResponse } from '@vercel/node';
+import { MercadoPagoConfig, Preference } from 'mercadopago';
+import { 
+  verifyWebhookSignature, 
+  fetchPayment, 
+  planConfigFromEnv, 
+  detectPlan 
+} from '../src/mercadopago-utils.js'; // Ajusta la ruta a donde tengas las funciones auxiliares
 
-export interface MpPayment {
-  id: number | string;
-  status: string; // approved | pending | rejected | refunded | cancelled | charged_back ...
-  transaction_amount: number;
-  currency_id: string;
-  date_approved?: string | null;
-  payer?: { email?: string | null } | null;
-}
+const client = new MercadoPagoConfig({ 
+  accessToken: process.env.MERCADOPAGO_ACCESS_TOKEN || '' 
+});
 
-export interface PlanConfig {
-  monthlyAmount: number;
-  annualAmount: number;
-  /** Monto mínimo (COP) para considerar un pago como aporte voluntario */
-  supportMinAmount: number;
-}
-
-export const DAYS: Record<PaidPlan, number> = { monthly: 30, annual: 365, support: 365 };
-
-export function planConfigFromEnv(env: Record<string, string | undefined> = process.env): PlanConfig {
-  const n = (v: string | undefined, d: number) => (v && Number.isFinite(Number(v)) ? Number(v) : d);
-  return {
-    monthlyAmount: n(env.PLAN_PRICE_MONTHLY, 6500),
-    annualAmount: n(env.PLAN_PRICE_ANNUAL, 30000),
-    supportMinAmount: n(env.SUPPORT_MIN_AMOUNT, 35000),
-  };
-}
-
-/** Deduce el plan por el monto pagado (COP). Monto exacto de mensual/anual primero; el resto = aporte voluntario. */
-export function detectPlan(amount: number, currency: string, cfg: PlanConfig): PaidPlan | null {
-  if (currency !== 'COP') return null;
-  if (amount === cfg.monthlyAmount) return 'monthly';
-  if (amount === cfg.annualAmount) return 'annual';
-  if (amount >= cfg.supportMinAmount) return 'support';
-  return null;
-}
-
-/**
- * Verifica la firma del webhook de Mercado Pago (cabecera x-signature):
- *   manifest = "id:<data.id>;request-id:<x-request-id>;ts:<ts>;"  →  HMAC-SHA256 con la clave secreta.
- */
-export function verifyWebhookSignature(opts: {
-  xSignature: string | null;
-  xRequestId: string | null;
-  dataId: string | null;
-  secret: string;
-}): boolean {
-  const { xSignature, xRequestId, dataId, secret } = opts;
-  if (!xSignature) return false;
-  const parts = Object.fromEntries(
-    xSignature.split(',').map((p) => {
-      const i = p.indexOf('=');
-      return [p.slice(0, i).trim(), p.slice(i + 1).trim()];
-    })
+export default async function handler(req: VercelRequest, res: VercelResponse) {
+  // 1. Configuración de CORS
+  res.setHeader('Access-Control-Allow-Credentials', 'true');
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'GET,OPTIONS,POST');
+  res.setHeader(
+    'Access-Control-Allow-Headers',
+    'X-Signature, X-Request-ID, Content-Type'
   );
-  if (!parts.ts || !parts.v1) return false;
 
-  let manifest = '';
-  if (dataId) manifest += `id:${dataId.toLowerCase()};`;
-  if (xRequestId) manifest += `request-id:${xRequestId};`;
-  manifest += `ts:${parts.ts};`;
+  if (req.method === 'OPTIONS') {
+    return res.status(200).end();
+  }
 
-  const expected = createHmac('sha256', secret).update(manifest).digest('hex');
-  const a = Buffer.from(expected);
-  const b = Buffer.from(parts.v1);
-  return a.length === b.length && timingSafeEqual(a, b);
-}
+  // ---------------------------------------------------------------------------
+  // RUTA A: Crear Preferencia de Pago (Llamado desde tu Frontend)
+  // ---------------------------------------------------------------------------
+  if (req.method === 'POST' && req.body?.action === 'create_preference') {
+    try {
+      const { planType, userEmail } = req.body;
+      const cfg = planConfigFromEnv();
 
-/** Consulta el pago real a Mercado Pago (la fuente de verdad: nunca se confía en el cuerpo del webhook). */
-export async function fetchPayment(id: string, accessToken: string, fetchImpl: typeof fetch = fetch): Promise<MpPayment> {
-  const res = await fetchImpl(`https://api.mercadopago.com/v1/payments/${encodeURIComponent(id)}`, {
-    headers: { Authorization: `Bearer ${accessToken}` },
-    signal: AbortSignal.timeout(10000),
-  });
-  if (!res.ok) throw new Error(`Mercado Pago respondió HTTP ${res.status}`);
-  return (await res.json()) as MpPayment;
+      let amount = cfg.monthlyAmount;
+      let title = 'Suscripción Mensual - LuBo';
+
+      if (planType === 'annual') {
+        amount = cfg.annualAmount;
+        title = 'Suscripción Anual - LuBo';
+      } else if (planType === 'support') {
+        amount = cfg.supportMinAmount;
+        title = 'Aporte Voluntario - LuBo';
+      }
+
+      const preference = new Preference(client);
+      const result = await preference.create({
+        body: {
+          items: [
+            {
+              id: planType || 'monthly',
+              title: title,
+              quantity: 1,
+              unit_price: amount,
+              currency_id: 'COP',
+            },
+          ],
+          payer: userEmail ? { email: userEmail } : undefined,
+          back_urls: {
+            success: `${req.headers.origin || 'https://tudominio.com'}/success`,
+            failure: `${req.headers.origin || 'https://tudominio.com'}/failure`,
+            pending: `${req.headers.origin || 'https://tudominio.com'}/pending`,
+          },
+          auto_return: 'approved',
+          notification_url: `${req.headers.host ? `https://${req.headers.host}` : ''}/api/mercadopago`,
+        }
+      });
+
+      return res.status(200).json({
+        id: result.id,
+        init_point: result.init_point,
+        sandbox_init_point: result.sandbox_init_point
+      });
+
+    } catch (error: any) {
+      console.error('Error al crear preferencia:', error);
+      return res.status(500).json({ error: error.message || 'Error interno' });
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // RUTA B: Webhook / Notificaciones (Llamado automáticamente por Mercado Pago)
+  // ---------------------------------------------------------------------------
+  if (req.method === 'POST') {
+    try {
+      const xSignature = req.headers['x-signature'] as string || null;
+      const xRequestId = req.headers['x-request-id'] as string || null;
+      const webhookSecret = process.env.MP_WEBHOOK_SECRET || '';
+
+      const topic = req.query.topic || req.body?.type;
+      const dataId = req.query['data.id'] || req.body?.data?.id;
+
+      // Validar firma del webhook si configuraste un secreto
+      if (webhookSecret && xSignature) {
+        const isValid = verifyWebhookSignature({
+          xSignature,
+          xRequestId,
+          dataId: dataId ? String(dataId) : null,
+          secret: webhookSecret,
+        });
+
+        if (!isValid) {
+          console.warn('Firma de webhook inválida');
+          return res.status(401).json({ error: 'Firma inválida' });
+        }
+      }
+
+      // Procesar si es una notificación de pago
+      if (topic === 'payment' && dataId) {
+        const paymentId = String(dataId);
+        
+        // Consultar la fuente de verdad en MP
+        const payment = await fetchPayment(paymentId, process.env.MERCADOPAGO_ACCESS_TOKEN || '');
+
+        if (payment.status === 'approved') {
+          const cfg = planConfigFromEnv();
+          const plan = detectPlan(payment.transaction_amount, payment.currency_id, cfg);
+          const payerEmail = payment.payer?.email;
+
+          // TODO: Aquí actualizas la base de datos (Firebase) para activar el plan al usuario
+          console.log(`Pago aprobado ${paymentId} por ${payment.transaction_amount} COP. Plan detectado:`, plan, 'Usuario:', payerEmail);
+        }
+      }
+
+      return res.status(200).json({ received: true });
+
+    } catch (error: any) {
+      console.error('Error procesando webhook:', error);
+      return res.status(500).json({ error: error.message });
+    }
+  }
+
+  res.setHeader('Allow', ['POST']);
+  return res.status(405).json({ error: `Método ${req.method} no permitido` });
 }
